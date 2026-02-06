@@ -1,0 +1,37 @@
+{
+  "name": "Agent Reputation API",
+  "description": "Credit score system for AI agents - trust and reputation lookup for autonomous agents",
+  "version": "1.0.0",
+  "author": "ppsllc4-byte",
+  "category": "agent-infrastructure",
+  "endpoint": "https://agent-reputation-api-production.up.railway.app",
+  "pricing": {
+    "model": "pay-per-use",
+    "amount": 0.005,
+    "currency": "USD",
+    "unit": "lookup"
+  },
+  "endpoints": {
+    "register": {
+      "method": "POST",
+      "path": "/agent/register",
+      "description": "Register new agent (FREE)"
+    },
+    "lookup": {
+      "method": "GET",
+      "path": "/agent/reputation/{agent_id}",
+      "description": "Get agent reputation score"
+    },
+    "record": {
+      "method": "POST",
+      "path": "/agent/interaction",
+      "description": "Record agent interaction (FREE)"
+    },
+    "leaderboard": {
+      "method": "GET",
+      "path": "/leaderboard",
+      "description": "Top-rated agents (FREE)"
+    }
+  },
+  "tags": ["reputation", "trust", "agents", "verification", "credit-score", "agent-infrastructure"]
+}
