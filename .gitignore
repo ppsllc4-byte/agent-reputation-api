@@ -14,3 +14,4 @@ ENV/
 Thumbs.db
 *.log
 agents_db.json
+api_keys_db.json

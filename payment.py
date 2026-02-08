@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 from fastapi import HTTPException
+from api_keys import api_key_manager
 
 load_dotenv()
 
@@ -19,28 +20,27 @@ class PaymentProcessor:
                     'price_data': {
                         'currency': 'usd',
                         'product_data': {
-                            'name': 'Agent Reputation Lookups',
-                            'description': 'Credits for agent reputation API lookups',
+                            'name': 'Agent Reputation API Credits',
+                            'description': 'Credits for agent reputation lookups'
                         },
-                        'unit_amount': int(PRICE_PER_LOOKUP * 100),
+                        'unit_amount': int(PRICE_PER_LOOKUP * 100)
                     },
-                    'quantity': quantity,
+                    'quantity': quantity
                 }],
                 mode='payment',
                 success_url=success_url,
                 cancel_url=cancel_url,
+                metadata={'credits': quantity}
             )
-            return {
-                'session_id': session.id,
-                'url': session.url,
-                'amount_total': session.amount_total / 100 if session.amount_total else 0
-            }
+            return {'session_id': session.id, 'url': session.url, 'amount_total': session.amount_total / 100 if session.amount_total else 0}
         except stripe.error.StripeError as e:
             raise HTTPException(status_code=400, detail=f"Checkout error: {str(e)}")
 
-async def verify_payment_token(authorization: Optional[str]) -> bool:
-    if not authorization:
+async def verify_payment_token(authorization: Optional[str], cost_in_credits: int = 1) -> bool:
+    if not authorization or not authorization.startswith("Bearer "):
         return False
-    if authorization.startswith("Bearer "):
-        return True
-    return False
+    api_key = authorization.replace("Bearer ", "").strip()
+    key_data = api_key_manager.validate_key(api_key)
+    if not key_data:
+        return False
+    return api_key_manager.deduct_credits(api_key, cost_in_credits)

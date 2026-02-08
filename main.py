@@ -1,20 +1,28 @@
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, List
 import os
 from dotenv import load_dotenv
 from datetime import datetime
 from database import db
 from payment import PaymentProcessor, verify_payment_token
+from api_keys import api_key_manager
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
 app = FastAPI(
     title="Agent Reputation API",
-    description="Trust and reputation scoring for AI agents - the credit score system for autonomous agents",
-    version="1.0.0"
+    description="Trust and reputation scoring for AI agents",
+    version="2.0.0"
 )
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,18 +32,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
 class AgentRegistration(BaseModel):
-    agent_id: str
-    name: Optional[str] = None
-    description: Optional[str] = None
-    contact: Optional[str] = None
+    agent_id: str = Field(..., min_length=1, max_length=100)
+    name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = Field(None, max_length=1000)
+    contact: Optional[str] = Field(None, max_length=200)
 
 class InteractionRecord(BaseModel):
-    agent_id: str
+    agent_id: str = Field(..., min_length=1, max_length=100)
     success: bool
-    response_time: Optional[float] = 0.0
-    details: Optional[Dict[str, Any]] = None
+    response_time: Optional[float] = Field(0.0, ge=0, le=300)
+    details: Optional[Dict] = {}
 
 class ReputationResponse(BaseModel):
     agent_id: str
@@ -50,98 +57,83 @@ class ReputationResponse(BaseModel):
     registered_at: str
     last_seen: str
 
-# Endpoints
 @app.get("/")
-async def root():
+@limiter.limit("100/minute")
+async def root(request: Request):
     return {
         "message": "Agent Reputation API - Credit Score for AI Agents",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "security": "API key authentication + rate limiting enabled",
         "endpoints": {
             "register": "POST /agent/register",
             "lookup": "GET /agent/reputation/{agent_id}",
             "record": "POST /agent/interaction",
             "leaderboard": "GET /leaderboard",
-            "purchase": "POST /purchase",
-            "docs": "/docs"
+            "credits": "GET /credits/check"
         }
     }
 
 @app.get("/health")
-async def health_check():
+@limiter.limit("100/minute")
+async def health_check(request: Request):
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "database": "operational"
+        "database": "operational",
+        "version": "2.0.0",
+        "security": "enabled"
     }
 
 @app.post("/agent/register")
-async def register_agent(registration: AgentRegistration):
-    """
-    Register a new agent in the reputation system
-    
-    Free to register - builds your reputation over time
-    """
+@limiter.limit("20/minute")
+async def register_agent(request: Request, registration: AgentRegistration):
+    """Register a new agent (FREE)"""
     try:
         metadata = {
             "name": registration.name,
             "description": registration.description,
             "contact": registration.contact
         }
-        
         result = await db.register_agent(registration.agent_id, metadata)
-        
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
-        
         return {
             "status": "registered",
             "agent_id": registration.agent_id,
             "reputation_score": result["reputation_score"],
-            "trust_level": result["trust_level"],
-            "message": "Agent registered successfully. Start building your reputation!"
+            "trust_level": result["trust_level"]
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 @app.get("/agent/reputation/{agent_id}", response_model=ReputationResponse)
+@limiter.limit("60/minute")
 async def get_reputation(
+    request: Request,
     agent_id: str,
     authorization: Optional[str] = Header(None)
 ):
-    """
-    Get reputation score for an agent
+    """Get reputation score (5 credits = $0.005)"""
     
-    Requires payment: $0.005 per lookup
-    
-    Returns:
-    - Reputation score (0-100)
-    - Trust level (new, moderate, trusted, verified, flagged)
-    - Interaction history
-    - Performance metrics
-    """
-    
-    # Verify payment
-    is_authorized = await verify_payment_token(authorization)
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=5)
     
     if not is_authorized:
         raise HTTPException(
             status_code=402,
             detail={
                 "error": "Payment required",
-                "message": "Agent reputation lookups require payment",
-                "pricing": "$0.005 per lookup",
+                "message": "Invalid API key or insufficient credits",
+                "pricing": "$0.005 per lookup (5 credits)",
                 "get_credits": "/purchase"
             }
         )
     
     try:
         agent = await db.get_agent(agent_id)
-        
         if not agent:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Agent '{agent_id}' not found. Register at /agent/register"
-            )
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         
         success_rate = 0.0
         if agent["total_interactions"] > 0:
@@ -160,33 +152,15 @@ async def get_reputation(
             registered_at=agent["registered_at"],
             last_seen=agent["last_seen"]
         )
-        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lookup failed: {str(e)}")
 
 @app.post("/agent/interaction")
-async def record_interaction(
-    interaction: InteractionRecord,
-    authorization: Optional[str] = Header(None)
-):
-    """
-    Record an interaction with an agent
-    
-    Free for registered agents to report their own interactions
-    Helps build reputation over time
-    
-    Args:
-    - agent_id: The agent that performed the action
-    - success: Whether the interaction was successful
-    - response_time: How long it took (seconds)
-    - details: Optional metadata about the interaction
-    """
-    
-    # For V1, allow free interaction recording
-    # In V2, might require authentication to prevent spam
-    
+@limiter.limit("100/minute")
+async def record_interaction(request: Request, interaction: InteractionRecord):
+    """Record an interaction (FREE)"""
     try:
         result = await db.record_interaction(
             agent_id=interaction.agent_id,
@@ -194,33 +168,25 @@ async def record_interaction(
             response_time=interaction.response_time or 0.0,
             details=interaction.details
         )
-        
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
-        
         return {
             "status": "recorded",
             "agent_id": interaction.agent_id,
             "new_reputation_score": result["reputation_score"],
-            "trust_level": result["trust_level"],
-            "total_interactions": result["total_interactions"]
+            "trust_level": result["trust_level"]
         }
-        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recording failed: {str(e)}")
 
 @app.get("/leaderboard")
-async def get_leaderboard(limit: int = Query(default=10, le=50)):
-    """
-    Get top-rated agents
-    
-    Free endpoint - discover the most trusted agents
-    """
+@limiter.limit("100/minute")
+async def get_leaderboard(request: Request, limit: int = Query(default=10, le=50)):
+    """Get top agents (FREE)"""
     try:
         leaders = await db.get_leaderboard(limit)
-        
         return {
             "leaderboard": [
                 {
@@ -234,29 +200,20 @@ async def get_leaderboard(limit: int = Query(default=10, le=50)):
             ],
             "total_agents": len(leaders)
         }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Leaderboard failed: {str(e)}")
 
 @app.get("/stats")
-async def get_stats():
-    """
-    Get overall platform statistics
-    
-    Free endpoint
-    """
+@limiter.limit("100/minute")
+async def get_stats(request: Request):
+    """Platform statistics (FREE)"""
     try:
         all_agents = await db.get_all_agents()
-        
         total_agents = len(all_agents)
         verified_agents = len([a for a in all_agents if a["trust_level"] == "verified"])
         trusted_agents = len([a for a in all_agents if a["trust_level"] in ["verified", "trusted"]])
         total_interactions = sum(a["total_interactions"] for a in all_agents)
-        
-        avg_reputation = 0
-        if total_agents > 0:
-            avg_reputation = sum(a["reputation_score"] for a in all_agents) / total_agents
-        
+        avg_reputation = sum(a["reputation_score"] for a in all_agents) / total_agents if total_agents > 0 else 0
         return {
             "total_agents": total_agents,
             "verified_agents": verified_agents,
@@ -264,73 +221,87 @@ async def get_stats():
             "total_interactions": total_interactions,
             "average_reputation": round(avg_reputation, 1)
         }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stats failed: {str(e)}")
 
+@app.get("/credits/check")
+@limiter.limit("100/minute")
+async def check_credits(request: Request, authorization: Optional[str] = Header(None)):
+    """Check remaining credits"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    api_key = authorization.replace("Bearer ", "").strip()
+    credits = api_key_manager.get_credits(api_key)
+    if credits is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return {
+        "credits_remaining": credits,
+        "lookups_available": credits // 5,
+        "status": "active" if credits >= 5 else "low_credits"
+    }
+
+@app.post("/admin/create-api-key")
+async def create_api_key(
+    user_email: str,
+    credits: int = 1000,
+    admin_secret: str = Header(None, alias="X-Admin-Secret")
+):
+    """Admin: Create API key"""
+    if admin_secret != os.getenv("API_SECRET_KEY"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    api_key = api_key_manager.create_key(user_email, credits)
+    return {
+        "status": "success",
+        "api_key": api_key,
+        "user_email": user_email,
+        "credits": credits,
+        "lookups": credits // 5,
+        "message": "SAVE THIS KEY!"
+    }
+
 @app.post("/purchase")
-async def purchase_credits(credits: int = 100, email: Optional[str] = None):
-    """
-    Purchase reputation lookup credits
-    
-    Args:
-    - credits: Number of lookups to purchase (default: 100)
-    - email: Optional email for receipt
-    
-    Returns Stripe checkout URL
-    """
-    if credits < 1 or credits > 10000:
-        raise HTTPException(status_code=400, detail="Credits must be between 1 and 10,000")
-    
+@limiter.limit("10/minute")
+async def purchase_credits(request: Request, credits: int = 1000, email: Optional[str] = None):
+    """Purchase reputation lookup credits"""
+    if credits < 5 or credits > 100000:
+        raise HTTPException(status_code=400, detail="Credits must be between 5 and 100,000")
     base_url = os.getenv("BASE_URL", "https://agent-reputation-api-production.up.railway.app")
-    
     session = await PaymentProcessor.create_checkout_session(
         success_url=f"{base_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{base_url}/payment/cancel",
         quantity=credits
     )
-    
     return {
         "checkout_url": session['url'],
         "session_id": session['session_id'],
         "total_amount": session['amount_total'],
         "credits": credits,
-        "price_per_lookup": 0.005,
-        "message": "Complete payment at checkout_url to receive your API key"
+        "lookups": credits // 5
     }
 
 @app.get("/payment/success")
 async def payment_success(session_id: str):
-    return {
-        "status": "success",
-        "message": "Payment successful! Your API key will be sent to your email.",
-        "session_id": session_id,
-        "next_steps": "Check your email for your API key and usage instructions"
-    }
+    return {"status": "success", "message": "Payment successful!", "session_id": session_id}
 
 @app.get("/payment/cancel")
 async def payment_cancel():
-    return {
-        "status": "cancelled",
-        "message": "Payment was cancelled. You can try again at /purchase"
-    }
+    return {"status": "cancelled", "message": "Payment cancelled"}
 
 @app.get("/pricing")
-async def get_pricing():
+@limiter.limit("100/minute")
+async def get_pricing(request: Request):
     return {
-        "lookup_price": "$0.005 per reputation lookup",
-        "registration": "Free",
-        "interaction_recording": "Free",
+        "lookup_price": "$0.005 per lookup (5 credits)",
+        "registration": "FREE",
+        "interaction_recording": "FREE",
         "bulk_pricing": {
-            "100_lookups": "$0.50",
-            "1000_lookups": "$5.00",
-            "10000_lookups": "$50.00"
-        },
-        "payment_methods": ["stripe"],
-        "api_key_required": True
+            "1000_credits": "$1.00 (200 lookups)",
+            "10000_credits": "$10.00 (2000 lookups)",
+            "100000_credits": "$100.00 (20000 lookups)"
+        }
     }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8001))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
