@@ -87,7 +87,6 @@ async def health_check(request: Request):
 @app.post("/agent/register")
 @limiter.limit("20/minute")
 async def register_agent(request: Request, registration: AgentRegistration):
-    """Register a new agent (FREE)"""
     try:
         metadata = {
             "name": registration.name,
@@ -115,8 +114,6 @@ async def get_reputation(
     agent_id: str,
     authorization: Optional[str] = Header(None)
 ):
-    """Get reputation score (5 credits = $0.005)"""
-    
     is_authorized = await verify_payment_token(authorization, cost_in_credits=5)
     
     if not is_authorized:
@@ -160,7 +157,6 @@ async def get_reputation(
 @app.post("/agent/interaction")
 @limiter.limit("100/minute")
 async def record_interaction(request: Request, interaction: InteractionRecord):
-    """Record an interaction (FREE)"""
     try:
         result = await db.record_interaction(
             agent_id=interaction.agent_id,
@@ -184,7 +180,6 @@ async def record_interaction(request: Request, interaction: InteractionRecord):
 @app.get("/leaderboard")
 @limiter.limit("100/minute")
 async def get_leaderboard(request: Request, limit: int = Query(default=10, le=50)):
-    """Get top agents (FREE)"""
     try:
         leaders = await db.get_leaderboard(limit)
         return {
@@ -206,7 +201,6 @@ async def get_leaderboard(request: Request, limit: int = Query(default=10, le=50
 @app.get("/stats")
 @limiter.limit("100/minute")
 async def get_stats(request: Request):
-    """Platform statistics (FREE)"""
     try:
         all_agents = await db.get_all_agents()
         total_agents = len(all_agents)
@@ -227,7 +221,6 @@ async def get_stats(request: Request):
 @app.get("/credits/check")
 @limiter.limit("100/minute")
 async def check_credits(request: Request, authorization: Optional[str] = Header(None)):
-    """Check remaining credits"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
     api_key = authorization.replace("Bearer ", "").strip()
@@ -246,7 +239,6 @@ async def create_api_key(
     credits: int = 1000,
     admin_secret: str = Header(None, alias="X-Admin-Secret")
 ):
-    """Admin: Create API key"""
     if admin_secret != os.getenv("API_SECRET_KEY"):
         raise HTTPException(status_code=403, detail="Forbidden")
     api_key = api_key_manager.create_key(user_email, credits)
@@ -262,7 +254,6 @@ async def create_api_key(
 @app.post("/purchase")
 @limiter.limit("10/minute")
 async def purchase_credits(request: Request, credits: int = 1000, email: Optional[str] = None):
-    """Purchase reputation lookup credits"""
     if credits < 5 or credits > 100000:
         raise HTTPException(status_code=400, detail="Credits must be between 5 and 100,000")
     base_url = os.getenv("BASE_URL", "https://agent-reputation-api-production.up.railway.app")
@@ -283,8 +274,7 @@ async def purchase_credits(request: Request, credits: int = 1000, email: Optiona
 async def payment_success(session_id: str):
     try:
         payment_info = await PaymentProcessor.verify_session(session_id)
-        user_email = payment_info['customer_email'] or 
-f"user_{session_id[:8]}@stripe.customer"
+        user_email = payment_info['customer_email'] or f"user_{session_id[:8]}@stripe.customer"
         credits = payment_info['credits']
         api_key = api_key_manager.create_key(user_email, credits)
         
@@ -301,14 +291,12 @@ f"user_{session_id[:8]}@stripe.customer"
                 "step_2": "Use it in Authorization header",
                 "example": f"Authorization: Bearer {api_key}"
             },
-            "docs": 
-"https://agent-reputation-api-production.up.railway.app/docs"
+            "docs": "https://agent-reputation-api-production.up.railway.app/docs"
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Payment processing 
-failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Payment processing failed: {str(e)}")
 
 @app.get("/payment/cancel")
 async def payment_cancel():
