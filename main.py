@@ -281,7 +281,34 @@ async def purchase_credits(request: Request, credits: int = 1000, email: Optiona
 
 @app.get("/payment/success")
 async def payment_success(session_id: str):
-    return {"status": "success", "message": "Payment successful!", "session_id": session_id}
+    try:
+        payment_info = await PaymentProcessor.verify_session(session_id)
+        user_email = payment_info['customer_email'] or 
+f"user_{session_id[:8]}@stripe.customer"
+        credits = payment_info['credits']
+        api_key = api_key_manager.create_key(user_email, credits)
+        
+        return {
+            "status": "success",
+            "message": "SAVE THIS API KEY! It will not be shown again.",
+            "api_key": api_key,
+            "credits": credits,
+            "lookups_available": credits // 5,
+            "user_email": user_email,
+            "amount_paid": f"${payment_info['amount_total']:.2f}",
+            "instructions": {
+                "step_1": "Copy the api_key above",
+                "step_2": "Use it in Authorization header",
+                "example": f"Authorization: Bearer {api_key}"
+            },
+            "docs": 
+"https://agent-reputation-api-production.up.railway.app/docs"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment processing 
+failed: {str(e)}")
 
 @app.get("/payment/cancel")
 async def payment_cancel():
