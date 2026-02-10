@@ -14,6 +14,10 @@ class PaymentProcessor:
     @staticmethod
     async def create_checkout_session(success_url: str, cancel_url: str, quantity: int = 1) -> Dict[str, Any]:
         try:
+            # Calculate total price first, then convert to cents
+            total_price = quantity * PRICE_PER_LOOKUP
+            amount_cents = int(total_price * 100)
+            
             session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
                 line_items=[{
@@ -21,11 +25,11 @@ class PaymentProcessor:
                         'currency': 'usd',
                         'product_data': {
                             'name': 'Agent Reputation API Credits',
-                            'description': 'Credits for agent reputation lookups'
+                            'description': f'{quantity} credits for agent reputation lookups'
                         },
-                        'unit_amount': int(PRICE_PER_LOOKUP * 100)
+                        'unit_amount': amount_cents
                     },
-                    'quantity': quantity
+                    'quantity': 1
                 }],
                 mode='payment',
                 success_url=success_url,
